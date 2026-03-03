@@ -8,6 +8,7 @@
 [![npm](https://img.shields.io/npm/v/better-antigravity)](https://www.npmjs.com/package/better-antigravity)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Antigravity](https://img.shields.io/badge/Antigravity-v1.107.0+-blue.svg)](https://antigravity.dev)
+[![Sponsor](https://img.shields.io/badge/Sponsor-Support%20this%20project-ff69b4?logo=githubsponsors&logoColor=white)](https://github.com/Kanezal/better-antigravity#support)
 
 *Antigravity is great. We just make it a little better.*
 
@@ -189,6 +190,17 @@ Found another Antigravity bug? Have a fix? PRs are welcome.
 > This project is not affiliated with Google or the Antigravity team. These are community patches and improvements. If Antigravity updates and the patches break, simply revert and re-apply (or wait for an updated patch).
 
 **Always report bugs officially** at [antigravity.google/support](https://antigravity.google/support) -- community patches are temporary solutions, not replacements for official fixes.
+
+---
+
+## Support
+
+If you find this project useful and want to support its development, you can send **USDT** to:
+
+| Network | Address |
+|---------|---------|
+| **TON** | `UQCjVh3C3mZc44GjT2IDsS4pmeOoUgRNxWMcb85NS5Bz_v1d` |
+| **TRON (TRC20)** | `TH3JKGjNrSDCsjkkSuneaSMZoJYF7CNTXD` |
 
 ---
 
