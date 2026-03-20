@@ -6,9 +6,9 @@ Detailed root cause analysis and patch descriptions for each fix in Better Antig
 
 ## Auto-Run Fix
 
-**Status:** Working  
-**Affected versions:** 1.107.0+  
-**Files patched:** `workbench.desktop.main.js`, `jetskiAgent.js`
+**Status:** Working
+**Affected versions:** 1.107.0+
+**Files patched:** `workbench.desktop.main.js`, `jetskiAgent/main.js`
 
 ### The Problem
 
@@ -24,10 +24,10 @@ In other words: the UI reads your setting, displays the correct dropdown value, 
 
 ```javascript
 // What exists (only fires on dropdown CHANGE):
-y = Mt(_ => {
-    setTerminalAutoExecutionPolicy(_),
-    _ === EAGER && confirm(true) // <- only when you manually switch
-}, [])
+v = Zt(B => {
+    r?.setTerminalAutoExecutionPolicy?.(B),
+    B === uF.EAGER && b(!0) // <- only when you manually switch
+}, [r, b])
 
 // What's MISSING (should fire on component mount):
 useEffect(() => {
@@ -35,55 +35,79 @@ useEffect(() => {
 }, [])
 ```
 
+### AG Version History
+
+| AG Version | onChange Pattern | jetskiAgent Path |
+|-----------|----------------|------------------|
+| < v1.107 | `(arg)=>{setFn(arg), arg===ENUM.EAGER&&confirm(!0)}` | `out/vs/code/electron-browser/workbench/jetskiAgent.js` |
+| >= v1.107 | `arg=>{ref?.setTerminalAutoExecutionPolicy?.(arg), arg===ENUM.EAGER&&confirm(!0)}` | `out/jetskiAgent/main.js` |
+
+**Key changes in v1.107:**
+- Minifier no longer wraps single arrow function arguments in parens: `(arg)=>` became `arg=>`
+- Direct function call `setFn(arg)` became optional chaining method `ref?.setTerminalAutoExecutionPolicy?.(arg)`
+- jetskiAgent bundle moved from `out/vs/code/electron-browser/workbench/` to `out/jetskiAgent/`
+
 ### How the Patch Works
 
 The patcher uses **structural regex matching** to find the `onChange` handler in the minified source. It matches the code by shape, not by variable names -- so it works even when Antigravity re-minifies on update.
 
 **Step 1: Find the onChange handler**
 
-Pattern: `<callback>=<useCallback>((<arg>)=>{<setFn>(<arg>),<arg>===<ENUM>.EAGER&&<confirm>(!0)},[...])`
+Pattern (v1.107+): `<var>=<useCallback>(<arg>=>{<ref>?.setTerminalAutoExecutionPolicy?.(<arg>),<arg>===<ENUM>.EAGER&&<confirm>(!0)},[`
 
 This matches the handler structurally:
 - An assignment to a variable
 - A `useCallback` call
-- Arrow function with one argument
-- Two expressions: set state + check EAGER and confirm
+- Arrow function with one argument (no parens)
+- Optional chaining on `setTerminalAutoExecutionPolicy`
+- Backreference to the same arg name (`\3`)
+- Check EAGER and confirm
 
 **Step 2: Extract variable names from context**
 
 From the surrounding 3000 characters, extract:
-- `policyVar`: `<var>=<something>?.terminalAutoExecutionPolicy??<ENUM>.OFF`
-- `secureVar`: `<var>=<something>?.secureModeEnabled??!1`
-- `useEffectFn`: the most frequently used short-named function matching the `fn(()=>{...})` pattern (frequency analysis)
+- `policyVar`: `<var>=<ref>?.terminalAutoExecutionPolicy??<ENUM>.OFF`
+- `secureVar`: `<var>=<ref>?.secureModeEnabled??!1`
+- `useEffectFn`: found via 3-phase strategy (see below)
 
-**Step 3: Generate and inject the patch**
+**Step 3: Find useEffect alias (3-phase strategy)**
+
+| Phase | Method | Reliability |
+|-------|--------|-------------|
+| 1. Declaration | `useEffect:()=>fn` in Preact export table | Most reliable — stable across versions |
+| 2. Cleanup-return | `fn(()=>{...return ()=>...})` — only useEffect returns cleanup | High — structural, not name-based |
+| 3. Frequency | Most common `fn(()=>{` in scope | Fallback — may pick wrong hook |
+
+**Step 4: Generate and inject the patch**
 
 ```javascript
-/*BA:autorun*/<useEffect>(()=>{<policyVar>===<ENUM>.EAGER&&!<secureVar>&&<confirm>(!0)},[])
+/*BA:autorun*/<useEffect>(()=>{<policyVar>===<ENUM>.EAGER&&!<secureVar>&&<confirm>(!0)},[]);
 ```
 
-The patch is injected immediately after the `onChange` handler's closing bracket.
+The trailing `;` is required — without it, `fn(...)return` in minified code is a SyntaxError.
 
-### Example Output
+The patch is injected after the `let` declaration semicolon that follows the `onChange` handler's `])`.
+
+### Example Output (v1.107.0)
 
 ```
  Antigravity "Always Proceed" Auto-Run Fix
 
  C:\Users\user\AppData\Local\Programs\Antigravity
- Version: 1.107.0 (IDE 1.19.5)
+ Version: 1.107.0 (IDE 1.19.6)
 
   [workbench] Found onChange at offset 12362782
-     callback=Mt, enum=Dhe, confirm=b
+     enum=uF, confirm=b
      policyVar=u
      secureVar=d
-     useEffect=mn (confidence: 30 hits)
-  [workbench] Patched (+43 bytes)
+     useEffect=fn (phase 1: declaration)
+  [workbench] Patched (+44 bytes)
   [jetskiAgent] Found onChange at offset 8388797
-     callback=ve, enum=rx, confirm=F
+     enum=Jd, confirm=F
      policyVar=d
      secureVar=f
-     useEffect=At (confidence: 55 hits)
-  [jetskiAgent] Patched (+42 bytes)
+     useEffect=At (phase 1: declaration)
+  [jetskiAgent] Patched (+43 bytes)
 
 Done! Restart Antigravity.
 ```
@@ -99,7 +123,12 @@ Done! Restart Antigravity.
 ### Why two files?
 
 The `run_command` step renderer exists in **two** bundles:
-1. `workbench.desktop.main.js` -- the main workbench bundle (~15MB)
-2. `jetskiAgent.js` -- the Cascade chat panel webview (~10MB)
+
+| Bundle | Path (v1.107+) | Size | Purpose |
+|--------|---------------|------|---------|
+| workbench | `out/vs/workbench/workbench.desktop.main.js` | ~15MB | Main IDE window |
+| jetskiAgent | `out/jetskiAgent/main.js` | ~10MB | Cascade chat panel (Agent Manager) |
 
 Both contain the same bug with slightly different minified variable names. The structural matcher handles both transparently.
+
+The old `jetskiAgent.js` path (`out/vs/code/electron-browser/workbench/jetskiAgent.js`) is kept as a legacy fallback for AG versions below v1.107.

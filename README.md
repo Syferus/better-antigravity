@@ -8,6 +8,7 @@
 [![npm](https://img.shields.io/npm/v/better-antigravity)](https://www.npmjs.com/package/better-antigravity)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Antigravity](https://img.shields.io/badge/Antigravity-v1.107.0+-blue.svg)](https://antigravity.dev)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white)](https://discord.gg/M8MAvr8eAM)
 [![Sponsor](https://img.shields.io/badge/Sponsor-Support%20this%20project-ff69b4?logo=githubsponsors&logoColor=white)](https://github.com/Kanezal/better-antigravity#support)
 
 *Antigravity is great. We just make it a little better.*
@@ -168,6 +169,12 @@ npm run publish:ovsx       # Publish to Open VSX (reads .env)
 ```
 
 The extension depends on [antigravity-sdk](https://www.npmjs.com/package/antigravity-sdk) from the monorepo sibling directory. The build script aliases it automatically.
+
+---
+
+## Community
+
+Join our **[Discord server](https://discord.gg/M8MAvr8eAM)** to discuss features, report bugs, and connect with other Antigravity modders.
 
 ---
 
