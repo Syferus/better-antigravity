@@ -95,7 +95,7 @@
     "esbuild": "^0.20.0"
   },
   "dependencies": {
-    "antigravity-sdk": "^1.6.0",
+    "antigravity-sdk": "^1.7.0",
     "sql.js": "^1.14.0"
   }
 }
