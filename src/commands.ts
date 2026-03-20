@@ -10,30 +10,36 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fsp from 'fs/promises';
 import { AntigravitySDK } from 'antigravity-sdk';
-import { getWorkbenchDir, getTargetFiles, isPatched, revertAll } from './auto-run';
+import { getAppRoot, getTargetFiles, isPatched, revertAll } from './auto-run';
 
 /**
  * Show extension status in the output channel.
  */
 export async function status(sdk: AntigravitySDK | null, output: vscode.OutputChannel): Promise<void> {
+    const agv = sdk?.agVersion;
+    const agLine = agv
+        ? `v${agv.version} (${agv.compatible ? 'compatible' : `INCOMPATIBLE — SDK supports ${agv.supportedRange}`})`
+        : 'not detected';
+
     const lines = [
         '=== Better Antigravity ===',
         '',
         `SDK:     ${sdk?.isInitialized ? `v${sdk.version}` : 'not initialized'}`,
+        `AG:      ${agLine}`,
         `LS:      ${sdk?.ls?.isReady ? `port ${sdk.ls.port}` : 'not ready'}`,
         `UI:      ${sdk?.integration.isInstalled() ? 'installed' : 'not installed'}`,
         `Titles:  ${sdk?.integration.titles.count ?? 0} custom`,
     ];
 
-    const dir = getWorkbenchDir();
-    if (dir) {
-        const files = getTargetFiles(dir);
+    const root = getAppRoot();
+    if (root) {
+        const files = getTargetFiles(root);
         for (const f of files) {
             const patched = await isPatched(f.path);
             lines.push(`AutoRun: ${f.label} = ${patched ? 'fixed' : 'not fixed'}`);
         }
     } else {
-        lines.push('AutoRun: workbench directory not found');
+        lines.push('AutoRun: app root not found');
     }
 
     output.appendLine(lines.join('\n'));
@@ -47,12 +53,6 @@ export async function status(sdk: AntigravitySDK | null, output: vscode.OutputCh
  * from being loaded by Electron (which causes grey screen).
  */
 export async function revertAutoRun(): Promise<void> {
-    const dir = getWorkbenchDir();
-    if (!dir) {
-        vscode.window.showErrorMessage('Workbench directory not found.');
-        return;
-    }
-
     const results = revertAll();
     const reverted = results.filter(r => r.status === 'reverted').length;
 

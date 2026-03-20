@@ -7,7 +7,7 @@
  */
 
 import * as vscode from 'vscode';
-import { AntigravitySDK } from 'antigravity-sdk';
+import { AntigravitySDK, Logger } from 'antigravity-sdk';
 import { autoApply } from './auto-run';
 import { status, revertAutoRun } from './commands';
 
@@ -22,6 +22,7 @@ function log(msg: string): void {
 export async function activate(context: vscode.ExtensionContext) {
     output = vscode.window.createOutputChannel('Better Antigravity');
     context.subscriptions.push(output);
+    Logger.setOutput(msg => output.appendLine(msg));
     log('Activating...');
 
     // ── Commands ──────────────────────────────────────────────────────

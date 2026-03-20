@@ -139,41 +139,79 @@ function findAntigravityPath() {
 
 // ─── Smart Pattern Matching ─────────────────────────────────────────────────
 
+const PATCH_MARKER = '/*BA:autorun*/';
+
+/**
+ * Find the useEffect alias using a three-phase strategy.
+ *
+ * Phase 1 (declaration): `useEffect:()=>fn` in export tables — most reliable.
+ * Phase 2 (cleanup-return): only useEffect returns a cleanup `()=>`.
+ * Phase 3 (frequency): most-called `fn(()=>{` in context — last resort.
+ */
+function findUseEffect(fullContent, context, exclude) {
+    // Phase 1: declaration in export/re-export table
+    const declMatch = fullContent.match(/useEffect:\(\)=>(\w+)/);
+    if (declMatch) return declMatch[1];
+
+    // Phase 2: cleanup-return — only useEffect returns () =>
+    const cleanupCandidates = {};
+    const cleanupRe = /\b(\w{1,4})\(\(\)=>\{[\s\S]{1,500}?return\s*\(\)=>/g;
+    let m;
+    while ((m = cleanupRe.exec(context)) !== null) {
+        const fn = m[1];
+        if (!exclude.includes(fn) && !/^(var|let|for|new|if)$/.test(fn)) {
+            cleanupCandidates[fn] = (cleanupCandidates[fn] || 0) + 1;
+        }
+    }
+    const cleanupBest = Object.entries(cleanupCandidates).sort((a, b) => b[1] - a[1])[0];
+    if (cleanupBest) return cleanupBest[0];
+
+    // Phase 3: frequency analysis
+    const candidates = {};
+    const freqRe = /\b(\w{1,4})\(\(\)=>\{/g;
+    while ((m = freqRe.exec(context)) !== null) {
+        const fn = m[1];
+        if (!exclude.includes(fn) && !/^(var|let|for|new|if)$/.test(fn)) {
+            candidates[fn] = (candidates[fn] || 0) + 1;
+        }
+    }
+    const freqBest = Object.entries(candidates).sort((a, b) => b[1] - a[1])[0];
+    return freqBest ? freqBest[0] : null;
+}
+
 /**
  * Finds the onChange handler for terminalAutoExecutionPolicy and extracts
- * variable names from context, regardless of minification.
- * 
- * Pattern we're looking for (structure, not exact names):
- *   <VAR_CONFIRM>=<useCallback>((<ARG>)=>{
- *       <stepHandler>?.setTerminalAutoExecutionPolicy?.(<ARG>),
- *       <ARG>===<ENUM>.EAGER&&<CONFIRM_FN>(!0)
- *   },[...])
- * 
- * From the surrounding context we also extract:
- *   <POLICY_VAR> = <stepHandler>?.terminalAutoExecutionPolicy ?? <ENUM>.OFF
- *   <SECURE_VAR> = <stepHandler>?.secureModeEnabled ?? !1
+ * all variable names needed to build the patch.
+ *
+ * AG v1.107+ pattern (optional chaining, no parens on single arg):
+ *   onChange = useCallback(arg => {
+ *     ref?.setTerminalAutoExecutionPolicy?.(arg),
+ *     arg === ENUM.EAGER && confirmFn(!0)
+ *   }, [ref, confirmFn])
  */
 function analyzeFile(content, label) {
-    // 1. Find the onChange handler: contains setTerminalAutoExecutionPolicy AND .EAGER
-    //    Pattern: VARNAME=CALLBACK(ARG=>{...setTerminalAutoExecutionPolicy...,ARG===ENUM.EAGER&&CONFIRM(!0)},[...])
-    const onChangeRe = /(\w+)=(\w+)\((\w+)=>\{\w+\?\.setTerminalAutoExecutionPolicy\?\.\(\3\),\3===(\w+)\.EAGER&&(\w+)\(!0\)\},\[[\w,]*\]\)/;
-    const onChangeMatch = content.match(onChangeRe);
+    // 1. Find onChange handler
+    const onChangeRe = /(\w+)=(\w+)\((\w+)=>\{(\w+)\?\.setTerminalAutoExecutionPolicy\?\.\(\3\),\3===(\w+)\.EAGER&&(\w+)\(!0\)\},\[/g;
+    const onChangeMatch = onChangeRe.exec(content);
 
     if (!onChangeMatch) {
         console.log(`  ❌ [${label}] Could not find onChange handler pattern`);
         return null;
     }
 
-    const [fullMatch, assignVar, callbackAlias, argName, enumAlias, confirmFn] = onChangeMatch;
-    const matchIndex = content.indexOf(fullMatch);
+    const [fullMatch, , , , , enumAlias, confirmFn] = onChangeMatch;
+    const matchIndex = onChangeMatch.index;
+    const insertPos = matchIndex + fullMatch.length;
 
     console.log(`  📋 [${label}] Found onChange at offset ${matchIndex}`);
-    console.log(`     callback=${callbackAlias}, enum=${enumAlias}, confirm=${confirmFn}`);
+    console.log(`     enum=${enumAlias}, confirm=${confirmFn}`);
+
+    const contextStart = Math.max(0, matchIndex - 3000);
+    const contextEnd = Math.min(content.length, matchIndex + 3000);
+    const context = content.substring(contextStart, contextEnd);
 
     // 2. Find policy variable: VARNAME=HANDLER?.terminalAutoExecutionPolicy??ENUM.OFF
-    const policyRe = new RegExp(`(\\w+)=\\w+\\?\\.terminalAutoExecutionPolicy\\?\\?${enumAlias}\\.OFF`);
-    const policyMatch = content.substring(Math.max(0, matchIndex - 2000), matchIndex).match(policyRe);
-
+    const policyMatch = /(\w+)=\w+\?\.terminalAutoExecutionPolicy\?\?(\w+)\.OFF/.exec(context);
     if (!policyMatch) {
         console.log(`  ❌ [${label}] Could not find policy variable`);
         return null;
@@ -182,9 +220,7 @@ function analyzeFile(content, label) {
     console.log(`     policyVar=${policyVar}`);
 
     // 3. Find secureMode variable: VARNAME=HANDLER?.secureModeEnabled??!1
-    const secureRe = /(\w+)=\w+\?\.secureModeEnabled\?\?!1/;
-    const secureMatch = content.substring(Math.max(0, matchIndex - 2000), matchIndex).match(secureRe);
-
+    const secureMatch = /(\w+)=\w+\?\.secureModeEnabled\?\?!1/.exec(context);
     if (!secureMatch) {
         console.log(`  ❌ [${label}] Could not find secureMode variable`);
         return null;
@@ -192,56 +228,21 @@ function analyzeFile(content, label) {
     const secureVar = secureMatch[1];
     console.log(`     secureVar=${secureVar}`);
 
-    // 4. Find useEffect alias: look for ALIAS(()=>{...},[...]) calls nearby (not useCallback/useMemo)
-    const nearbyCode = content.substring(Math.max(0, matchIndex - 5000), matchIndex + 5000);
-    const effectCandidates = {};
-    const effectRe = /\b(\w{2,3})\(\(\)=>\{[^}]{3,80}\},\[/g;
-    let m;
-    while ((m = effectRe.exec(nearbyCode)) !== null) {
-        const alias = m[1];
-        if (alias !== callbackAlias && alias !== 'var' && alias !== 'new') {
-            effectCandidates[alias] = (effectCandidates[alias] || 0) + 1;
-        }
-    }
-
-    // Also check broader file for common useEffect patterns (with cleanup return)
-    const cleanupRe = /\b(\w{2,3})\(\(\)=>\{[^}]*return\s*\(\)=>/g;
-    while ((m = cleanupRe.exec(content)) !== null) {
-        const alias = m[1];
-        if (alias !== callbackAlias) {
-            effectCandidates[alias] = (effectCandidates[alias] || 0) + 5; // higher weight
-        }
-    }
-
-    // Remove known non-useEffect aliases (useMemo patterns)
-    // useMemo: alias(()=>EXPRESSION,[deps]) — returns a value, often assigned
-    // useEffect: alias(()=>{STATEMENTS},[deps]) — no return value
-
-    // Pick the most common candidate
-    let useEffectAlias = null;
-    let maxCount = 0;
-    for (const [alias, count] of Object.entries(effectCandidates)) {
-        if (count > maxCount) {
-            maxCount = count;
-            useEffectAlias = alias;
-        }
-    }
-
+    // 4. Find useEffect alias (3-phase)
+    const useEffectAlias = findUseEffect(content, context, [confirmFn]);
     if (!useEffectAlias) {
         console.log(`  ❌ [${label}] Could not determine useEffect alias`);
         return null;
     }
-    console.log(`     useEffect=${useEffectAlias} (confidence: ${maxCount} hits)`);
+    console.log(`     useEffect=${useEffectAlias}`);
 
-    // 5. Build patch
-    const patchCode = `_aep=${useEffectAlias}(()=>{${policyVar}===${enumAlias}.EAGER&&!${secureVar}&&${confirmFn}(!0)},[]),`;
+    // 5. Insertion point: after useCallback closing `])`, then after the `;`
+    const afterOnChange = content.indexOf('])', insertPos);
+    if (afterOnChange === -1) return null;
+    const insertAt = content.indexOf(';', afterOnChange);
+    if (insertAt === -1) return null;
 
-    return {
-        target: fullMatch,
-        replacement: patchCode + fullMatch,
-        patchMarker: `_aep=${useEffectAlias}(()=>{${policyVar}===${enumAlias}.EAGER`,
-        label
-    };
+    return { enumAlias, confirmFn, policyVar, secureVar, useEffectAlias, insertAt };
 }
 
 // ─── File Operations ────────────────────────────────────────────────────────
@@ -252,49 +253,40 @@ function patchFile(filePath, label) {
         return false;
     }
 
-    const content = fs.readFileSync(filePath, 'utf8');
+    let content = fs.readFileSync(filePath, 'utf8');
 
-    // Check if already patched
-    if (content.includes('_aep=')) {
-        const existingPatch = content.match(/_aep=\w+\(\(\)=>\{[^}]+EAGER[^}]+\},\[\]\)/);
-        if (existingPatch) {
-            console.log(`  ⏭️  [${label}] Already patched`);
-            return true;
-        }
+    if (content.includes(PATCH_MARKER)) {
+        console.log(`  ⏭️  [${label}] Already patched`);
+        return true;
     }
 
     const analysis = analyzeFile(content, label);
     if (!analysis) return false;
 
-    // Verify target is unique
-    const count = content.split(analysis.target).length - 1;
-    if (count !== 1) {
-        console.log(`  ❌ [${label}] Target found ${count} times (expected 1)`);
-        return false;
-    }
+    const { enumAlias, confirmFn, policyVar, secureVar, useEffectAlias, insertAt } = analysis;
+    const patch = `${PATCH_MARKER}${useEffectAlias}(()=>{${policyVar}===${enumAlias}.EAGER&&!${secureVar}&&${confirmFn}(!0)},[]);`;
 
-    // Backup
-    if (!fs.existsSync(filePath + '.bak')) {
-        fs.copyFileSync(filePath, filePath + '.bak');
+    // Backup (only if one doesn't exist)
+    const bak = filePath + '.ba-backup';
+    if (!fs.existsSync(bak)) {
+        fs.copyFileSync(filePath, bak);
         console.log(`  📦 [${label}] Backup created`);
     }
 
-    // Apply
-    const patched = content.replace(analysis.target, analysis.replacement);
-    fs.writeFileSync(filePath, patched, 'utf8');
-
-    const diff = fs.statSync(filePath).size - fs.statSync(filePath + '.bak').size;
-    console.log(`  ✅ [${label}] Patched (+${diff} bytes)`);
+    content = content.substring(0, insertAt) + patch + content.substring(insertAt);
+    fs.writeFileSync(filePath, content, 'utf8');
+    console.log(`  ✅ [${label}] Patched (+${patch.length} bytes)`);
     return true;
 }
 
 function revertFile(filePath, label) {
-    const bak = filePath + '.bak';
+    const bak = filePath + '.ba-backup';
     if (!fs.existsSync(bak)) {
         console.log(`  ⏭️  [${label}] No backup, skipping`);
         return;
     }
     fs.copyFileSync(bak, filePath);
+    fs.unlinkSync(bak);
     console.log(`  ✅ [${label}] Restored`);
 }
 
@@ -304,8 +296,8 @@ function checkFile(filePath, label) {
         return false;
     }
     const content = fs.readFileSync(filePath, 'utf8');
-    const patched = content.includes('_aep=') && /_aep=\w+\(\(\)=>\{[^}]+EAGER/.test(content);
-    const hasBak = fs.existsSync(filePath + '.bak');
+    const patched = content.includes(PATCH_MARKER);
+    const hasBak = fs.existsSync(filePath + '.ba-backup');
 
     if (patched) {
         console.log(`  ✅ [${label}] PATCHED` + (hasBak ? ' (backup exists)' : ''));
@@ -314,7 +306,7 @@ function checkFile(filePath, label) {
         if (analysis) {
             console.log(`  ⬜ [${label}] NOT PATCHED (patchable)`);
         } else {
-            console.log(`  ⚠️  [${label}] NOT PATCHED (may be incompatible)`);
+            console.log(`  ⚠️  [${label}] NOT PATCHED (pattern not found — may be incompatible or already fixed by AG)`);
         }
     }
     return patched;
@@ -378,7 +370,8 @@ function main() {
     const files = [
         { path: path.join(basePath, 'resources', 'app', 'out', 'vs', 'workbench', 'workbench.desktop.main.js'), label: 'workbench' },
         { path: path.join(basePath, 'resources', 'app', 'out', 'jetskiAgent', 'main.js'), label: 'jetskiAgent' },
-    ];
+        { path: path.join(basePath, 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench', 'jetskiAgent.js'), label: 'jetskiAgent-legacy' },
+    ].filter(f => fs.existsSync(f.path));
 
     switch (action) {
         case 'check':

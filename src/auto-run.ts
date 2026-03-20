@@ -6,6 +6,24 @@
  *
  * Works across AG versions because it matches code STRUCTURE, not variable NAMES.
  *
+ * ## File targets (AG v1.107+)
+ *
+ *   out/vs/workbench/workbench.desktop.main.js  — main IDE window (Lau component)
+ *   out/jetskiAgent/main.js                     — chat panel (LSi component)
+ *
+ * ## AG version history
+ *
+ *   < v1.107  jetskiAgent bundle was at: out/vs/code/electron-browser/workbench/jetskiAgent.js
+ *   ≥ v1.107  jetskiAgent bundle moved to: out/jetskiAgent/main.js
+ *             (old path is now a tiny bootstrap that imports the new location)
+ *
+ * ## Regex change (v1.107)
+ *
+ *   OLD: `(arg)=>{setFn(arg),arg===ENUM.EAGER&&confirm(!0)}`
+ *        — parens around single arg, direct function call
+ *   NEW: `arg=>{ref?.setTerminalAutoExecutionPolicy?.(arg),arg===ENUM.EAGER&&confirm(!0)}`
+ *        — no parens (minifier drops them), optional chaining method call
+ *
  * @module auto-run
  */
 
@@ -17,7 +35,17 @@ import * as fsp from 'fs/promises';
 const PATCH_MARKER = '/*BA:autorun*/';
 
 /**
- * Resolve the Antigravity workbench directory.
+ * Resolve the Antigravity app root (resources/app directory).
+ */
+export function getAppRoot(): string | null {
+    const appData = process.env.LOCALAPPDATA || '';
+    const dir = path.join(appData, 'Programs', 'Antigravity', 'resources', 'app');
+    return fs.existsSync(dir) ? dir : null;
+}
+
+/**
+ * Resolve the Antigravity workbench HTML directory.
+ * Used by integration module for workbench.html patching.
  */
 export function getWorkbenchDir(): string | null {
     const appData = process.env.LOCALAPPDATA || '';
@@ -31,11 +59,19 @@ export function getWorkbenchDir(): string | null {
 
 /**
  * Target files that need the auto-run patch.
+ *
+ * Supports both old (< v1.107) and new (≥ v1.107) AG layouts.
+ * Files are filtered to only existing paths; analyzeFile() will return
+ * null for bootstrap stubs (old jetskiAgent.js) with no EAGER content.
  */
-export function getTargetFiles(workbenchDir: string): Array<{ path: string; label: string }> {
+export function getTargetFiles(appRoot: string): Array<{ path: string; label: string }> {
     return [
-        { path: path.join(workbenchDir, 'workbench.desktop.main.js'), label: 'workbench' },
-        { path: path.join(workbenchDir, 'jetskiAgent.js'), label: 'jetskiAgent' },
+        // Main workbench JS (correct path — was never in workbenchDir!)
+        { path: path.join(appRoot, 'out', 'vs', 'workbench', 'workbench.desktop.main.js'), label: 'workbench' },
+        // Chat panel — new location (AG ≥ v1.107)
+        { path: path.join(appRoot, 'out', 'jetskiAgent', 'main.js'), label: 'jetskiAgent' },
+        // Chat panel — old location (AG < v1.107, kept for backward compat)
+        { path: path.join(appRoot, 'out', 'vs', 'code', 'electron-browser', 'workbench', 'jetskiAgent.js'), label: 'jetskiAgent-legacy' },
     ].filter(f => fs.existsSync(f.path));
 }
 
@@ -44,9 +80,6 @@ export function getTargetFiles(workbenchDir: string): Array<{ path: string; labe
  */
 export async function isPatched(filePath: string): Promise<boolean> {
     try {
-        // Read only first 50 bytes of the marker area via a small buffer scan
-        // The marker is injected mid-file, so we must read the full file.
-        // Use async to avoid blocking extension host.
         const content = await fsp.readFile(filePath, 'utf8');
         return content.includes(PATCH_MARKER);
     } catch {
@@ -57,12 +90,23 @@ export async function isPatched(filePath: string): Promise<boolean> {
 /**
  * Analyze a file to find the onChange handler and extract variable names.
  *
- * Returns null if pattern not found (file may already be fixed by AG update).
+ * Returns null if pattern not found (bootstrap stub, file fixed by AG, etc.).
+ *
+ * Anchor strategy: search for the literal string "setTerminalAutoExecutionPolicy"
+ * first, then match the useCallback structure within a 500-char window.
+ * String literals survive minification better than variable names.
  */
 function analyzeFile(content: string): AnalysisResult | null {
-    // Find onChange handler for terminalAutoExecutionPolicy
-    // Pattern: <callback>=<useCallback>((<arg>)=>{<setFn>(<arg>),<arg>===<ENUM>.EAGER&&<confirm>(true)},[...])
-    const onChangeRegex = /(\w+)=(\w+)\((\(\w+\))=>\{(\w+)\(\w+\),\w+===(\w+)\.EAGER&&(\w+)\(!0\)\},\[/g;
+    // Find the onChange handler for terminalAutoExecutionPolicy.
+    //
+    // AG v1.107+ pattern (optional chaining, no parens on single arg):
+    //   onChange = useCallback(arg => {
+    //     ref?.setTerminalAutoExecutionPolicy?.(arg),
+    //     arg === ENUM.EAGER && confirmFn(!0)
+    //   }, [ref, confirmFn])
+    //
+    // Captures: (onChange)(useCallback)(arg)(ref)(ENUM)(confirmFn)
+    const onChangeRegex = /(\w+)=(\w+)\((\w+)=>\{(\w+)\?\.setTerminalAutoExecutionPolicy\?\.\(\3\),\3===(\w+)\.EAGER&&(\w+)\(!0\)\},\[/g;
     const match = onChangeRegex.exec(content);
 
     if (!match) return null;
@@ -75,9 +119,9 @@ function analyzeFile(content: string): AnalysisResult | null {
     const contextEnd = Math.min(content.length, match.index + 3000);
     const context = content.substring(contextStart, contextEnd);
 
-    // policyVar: <var>=<something>?.terminalAutoExecutionPolicy??<ENUM>.OFF
+    // policyVar: var = ref?.terminalAutoExecutionPolicy ?? ENUM.OFF
     const policyMatch = /(\w+)=\w+\?\.terminalAutoExecutionPolicy\?\?(\w+)\.OFF/.exec(context);
-    // secureVar: <var>=<something>?.secureModeEnabled??!1
+    // secureVar: var = ref?.secureModeEnabled ?? !1
     const secureMatch = /(\w+)=\w+\?\.secureModeEnabled\?\?!1/.exec(context);
 
     if (!policyMatch || !secureMatch) return null;
@@ -85,12 +129,13 @@ function analyzeFile(content: string): AnalysisResult | null {
     const policyVar = policyMatch[1];
     const secureVar = secureMatch[1];
 
-    // Find useEffect — most frequently used short-named function in the scope
-    const useEffectFn = findUseEffect(context, [confirmFn]);
-
+    // Find useEffect alias in this file
+    const useEffectFn = findUseEffect(content, context, [confirmFn]);
     if (!useEffectFn) return null;
 
-    // Find insertion point: after the useCallback closing
+    // Find insertion point: after the useCallback closing `])`, then after the `;`
+    // that ends the entire let declaration (the comma-separated declarators
+    // between onChange and return don't contain `;`).
     const afterOnChange = content.indexOf('])', insertPos);
     if (afterOnChange === -1) return null;
 
@@ -108,30 +153,42 @@ function analyzeFile(content: string): AnalysisResult | null {
 }
 
 /**
- * Find the useEffect function name by frequency analysis.
+ * Find the useEffect function alias using a three-phase strategy.
+ *
+ * Phase 1 (declaration): `useEffect:()=>fn` in export tables — most reliable.
+ * Phase 2 (cleanup-return): only useEffect returns a cleanup function `()=>`.
+ * Phase 3 (frequency): most-called `fn(()=>{` in context — last resort.
  */
-function findUseEffect(context: string, exclude: string[]): string | null {
-    const candidates: Record<string, number> = {};
-    const regex = /(\w{1,3})\(\(\)=>\{/g;
-    let m;
+function findUseEffect(fullContent: string, context: string, exclude: string[]): string | null {
+    // Phase 1: declaration in export/re-export table
+    // Pattern: useEffect:()=>fn  (Preact/React runtime exports)
+    const declMatch = fullContent.match(/useEffect:\(\)=>(\w+)/);
+    if (declMatch) return declMatch[1];
 
-    while ((m = regex.exec(context)) !== null) {
+    // Phase 2: cleanup-return pattern — only useEffect returns `() =>`
+    const cleanupRegex = /\b(\w{1,4})\(\(\)=>\{[\s\S]{1,500}?return\s*\(\)=>/g;
+    const cleanupCandidates: Record<string, number> = {};
+    let m: RegExpExecArray | null;
+    while ((m = cleanupRegex.exec(context)) !== null) {
         const fn = m[1];
-        if (fn.length <= 3 && !exclude.includes(fn)) {
+        if (!exclude.includes(fn) && !/^(var|let|for|new|if)$/.test(fn)) {
+            cleanupCandidates[fn] = (cleanupCandidates[fn] || 0) + 1;
+        }
+    }
+    const cleanupBest = Object.entries(cleanupCandidates).sort((a, b) => b[1] - a[1])[0];
+    if (cleanupBest) return cleanupBest[0];
+
+    // Phase 3: frequency analysis — most common fn(()=>{ in scope
+    const candidates: Record<string, number> = {};
+    const freqRegex = /\b(\w{1,4})\(\(\)=>\{/g;
+    while ((m = freqRegex.exec(context)) !== null) {
+        const fn = m[1];
+        if (!exclude.includes(fn) && !/^(var|let|for|new|if)$/.test(fn)) {
             candidates[fn] = (candidates[fn] || 0) + 1;
         }
     }
-
-    let best = '';
-    let maxCount = 0;
-    for (const [fn, count] of Object.entries(candidates)) {
-        if (count > maxCount) {
-            best = fn;
-            maxCount = count;
-        }
-    }
-
-    return best || null;
+    const freqBest = Object.entries(candidates).sort((a, b) => b[1] - a[1])[0];
+    return freqBest?.[0] ?? null;
 }
 
 interface AnalysisResult {
@@ -163,8 +220,10 @@ export async function patchFile(filePath: string, label: string): Promise<PatchR
 
         const { enumName, confirmFn, policyVar, secureVar, useEffectFn, insertAt } = analysis;
 
-        // Build the patch
-        const patch = `${PATCH_MARKER}${useEffectFn}(()=>{${policyVar}===${enumName}.EAGER&&!${secureVar}&&${confirmFn}(!0)},[])`;
+        // Build the patch: useEffect that auto-confirms on mount when policy is EAGER.
+        // Trailing `;` is required — insertion point is right before `return`, and in
+        // minified one-liner code `fn(...)return` is a SyntaxError without it.
+        const patch = `${PATCH_MARKER}${useEffectFn}(()=>{${policyVar}===${enumName}.EAGER&&!${secureVar}&&${confirmFn}(!0)},[]);`;
 
         // Create backup (only if one doesn't exist)
         const backup = filePath + '.ba-backup';
@@ -172,7 +231,7 @@ export async function patchFile(filePath: string, label: string): Promise<PatchR
             await fsp.copyFile(filePath, backup);
         }
 
-        // Insert
+        // Insert patch after the let declaration semicolon
         content = content.substring(0, insertAt) + patch + content.substring(insertAt);
         await fsp.writeFile(filePath, content, 'utf8');
 
@@ -214,22 +273,20 @@ export interface PatchResult {
  * @returns Array of results for each file
  */
 export async function autoApply(): Promise<PatchResult[]> {
-    const dir = getWorkbenchDir();
-    if (!dir) return [];
+    const root = getAppRoot();
+    if (!root) return [];
 
-    const files = getTargetFiles(dir);
+    const files = getTargetFiles(root);
     return Promise.all(files.map(f => patchFile(f.path, f.label)));
 }
 
 /**
  * Revert all target files from backups.
- *
- * @returns Number of files reverted
  */
 export function revertAll(): PatchResult[] {
-    const dir = getWorkbenchDir();
-    if (!dir) return [];
+    const root = getAppRoot();
+    if (!root) return [];
 
-    const files = getTargetFiles(dir);
+    const files = getTargetFiles(root);
     return files.map(f => revertFile(f.path, f.label));
 }
