@@ -29,9 +29,9 @@
   ],
   "engines": {
     "vscode": "^1.85.0",
-    "node": ">=16.0.0",
-    "antigravity": ">=1.107.0"
+    "node": ">=16.0.0"
   },
+  "antigravityVersions": ">=1.107.0",
   "categories": [
     "Other"
   ],
