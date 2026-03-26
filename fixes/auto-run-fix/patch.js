@@ -19,6 +19,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 // ─── Installation Detection ─────────────────────────────────────────────────
 
@@ -140,9 +141,72 @@ function findAntigravityPath() {
 // ─── Smart Pattern Matching ─────────────────────────────────────────────────
 
 const PATCH_MARKER = '/*BA:autorun*/';
+const PRODUCT_BACKUP_SUFFIX = '.ba-backup';
 
 function isOptionalTarget(label) {
     return label === 'jetskiAgent-legacy';
+}
+
+function getProductPaths(basePath) {
+    const productPath = path.join(basePath, 'resources', 'app', 'product.json');
+    return {
+        productPath,
+        backupPath: productPath + PRODUCT_BACKUP_SUFFIX,
+    };
+}
+
+function fileChecksumBase64(filePath) {
+    const hash = crypto.createHash('sha256');
+    hash.update(fs.readFileSync(filePath));
+    return hash.digest('base64').replace(/=+$/, '');
+}
+
+function getChecksumKey(basePath, filePath) {
+    const appOutPath = path.join(basePath, 'resources', 'app', 'out');
+    return path.relative(appOutPath, filePath).replace(/\\/g, '/');
+}
+
+function syncProductChecksums(basePath, files) {
+    const { productPath, backupPath } = getProductPaths(basePath);
+    if (!fs.existsSync(productPath)) return false;
+
+    const raw = fs.readFileSync(productPath, 'utf8');
+    const product = JSON.parse(raw);
+    if (!product.checksums || typeof product.checksums !== 'object') return false;
+
+    let changed = false;
+    for (const file of files) {
+        if (!fs.existsSync(file.path)) continue;
+        const key = getChecksumKey(basePath, file.path);
+        if (!(key in product.checksums)) continue;
+
+        const actual = fileChecksumBase64(file.path);
+        if (product.checksums[key] !== actual) {
+            product.checksums[key] = actual;
+            changed = true;
+        }
+    }
+
+    if (!changed) return false;
+
+    if (!fs.existsSync(backupPath)) {
+        fs.copyFileSync(productPath, backupPath);
+        console.log('  📦 [product.json] Backup created');
+    }
+
+    fs.writeFileSync(productPath, JSON.stringify(product, null, '\t'), 'utf8');
+    console.log('  ✅ [product.json] Checksums updated');
+    return true;
+}
+
+function restoreProductChecksums(basePath) {
+    const { productPath, backupPath } = getProductPaths(basePath);
+    if (!fs.existsSync(backupPath)) return false;
+
+    fs.copyFileSync(backupPath, productPath);
+    fs.unlinkSync(backupPath);
+    console.log('  ✅ [product.json] Restored');
+    return true;
 }
 
 /**
@@ -394,10 +458,12 @@ function main() {
             break;
         case 'revert':
             files.forEach(f => revertFile(f.path, f.label));
+            restoreProductChecksums(basePath);
             console.log('\n✨ Restored! Restart Antigravity.');
             break;
         case 'apply':
             const ok = files.every(f => patchFile(f.path, f.label));
+            if (ok) syncProductChecksums(basePath, files);
             console.log(ok
                 ? '\n✨ Done! Restart Antigravity.\n💡 Run with --revert to undo.\n⚠️  Re-run after Antigravity updates.'
                 : '\n⚠️  Some patches failed.');
