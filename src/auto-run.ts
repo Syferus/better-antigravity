@@ -34,6 +34,10 @@ import * as fsp from 'fs/promises';
 /** Marker comment to identify our patches */
 const PATCH_MARKER = '/*BA:autorun*/';
 
+function isOptionalTarget(label: string): boolean {
+    return label === 'jetskiAgent-legacy';
+}
+
 /**
  * Resolve the Antigravity app root (resources/app directory).
  */
@@ -215,7 +219,11 @@ export async function patchFile(filePath: string, label: string): Promise<PatchR
 
         const analysis = analyzeFile(content);
         if (!analysis) {
-            return { success: false, label, status: 'pattern-not-found' };
+            return {
+                success: isOptionalTarget(label),
+                label,
+                status: isOptionalTarget(label) ? 'skipped' : 'pattern-not-found',
+            };
         }
 
         const { enumName, confirmFn, policyVar, secureVar, useEffectFn, insertAt } = analysis;
@@ -262,7 +270,7 @@ export function revertFile(filePath: string, label: string): PatchResult {
 export interface PatchResult {
     success: boolean;
     label: string;
-    status: 'patched' | 'already-patched' | 'pattern-not-found' | 'reverted' | 'no-backup' | 'error';
+    status: 'patched' | 'already-patched' | 'pattern-not-found' | 'skipped' | 'reverted' | 'no-backup' | 'error';
     bytesAdded?: number;
     error?: string;
 }
