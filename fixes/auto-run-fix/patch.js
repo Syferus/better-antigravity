@@ -141,6 +141,10 @@ function findAntigravityPath() {
 
 const PATCH_MARKER = '/*BA:autorun*/';
 
+function isOptionalTarget(label) {
+    return label === 'jetskiAgent-legacy';
+}
+
 /**
  * Find the useEffect alias using a three-phase strategy.
  *
@@ -189,13 +193,16 @@ function findUseEffect(fullContent, context, exclude) {
  *     arg === ENUM.EAGER && confirmFn(!0)
  *   }, [ref, confirmFn])
  */
-function analyzeFile(content, label) {
+function analyzeFile(content, label, options = {}) {
+    const { suppressNotFoundLog = false } = options;
     // 1. Find onChange handler
     const onChangeRe = /(\w+)=(\w+)\((\w+)=>\{(\w+)\?\.setTerminalAutoExecutionPolicy\?\.\(\3\),\3===(\w+)\.EAGER&&(\w+)\(!0\)\},\[/g;
     const onChangeMatch = onChangeRe.exec(content);
 
     if (!onChangeMatch) {
-        console.log(`  ❌ [${label}] Could not find onChange handler pattern`);
+        if (!suppressNotFoundLog) {
+            console.log(`  ❌ [${label}] Could not find onChange handler pattern`);
+        }
         return null;
     }
 
@@ -260,8 +267,14 @@ function patchFile(filePath, label) {
         return true;
     }
 
-    const analysis = analyzeFile(content, label);
-    if (!analysis) return false;
+    const analysis = analyzeFile(content, label, { suppressNotFoundLog: isOptionalTarget(label) });
+    if (!analysis) {
+        if (isOptionalTarget(label)) {
+            console.log(`  ⏭️  [${label}] Skipped (legacy bootstrap stub or incompatible layout)`);
+            return true;
+        }
+        return false;
+    }
 
     const { enumAlias, confirmFn, policyVar, secureVar, useEffectAlias, insertAt } = analysis;
     const patch = `${PATCH_MARKER}${useEffectAlias}(()=>{${policyVar}===${enumAlias}.EAGER&&!${secureVar}&&${confirmFn}(!0)},[]);`;
@@ -302,9 +315,11 @@ function checkFile(filePath, label) {
     if (patched) {
         console.log(`  ✅ [${label}] PATCHED` + (hasBak ? ' (backup exists)' : ''));
     } else {
-        const analysis = analyzeFile(content, label);
+        const analysis = analyzeFile(content, label, { suppressNotFoundLog: isOptionalTarget(label) });
         if (analysis) {
             console.log(`  ⬜ [${label}] NOT PATCHED (patchable)`);
+        } else if (isOptionalTarget(label)) {
+            console.log(`  ⏭️  [${label}] SKIPPED (legacy bootstrap stub or incompatible layout)`);
         } else {
             console.log(`  ⚠️  [${label}] NOT PATCHED (pattern not found — may be incompatible or already fixed by AG)`);
         }
