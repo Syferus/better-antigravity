@@ -30,12 +30,72 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
+import { createHash } from 'crypto';
 
 /** Marker comment to identify our patches */
 const PATCH_MARKER = '/*BA:autorun*/';
+const PRODUCT_BACKUP_SUFFIX = '.ba-backup';
 
 function isOptionalTarget(label: string): boolean {
     return label === 'jetskiAgent-legacy';
+}
+
+function getProductPaths(appRoot: string): { productPath: string; backupPath: string } {
+    const productPath = path.join(appRoot, 'product.json');
+    return {
+        productPath,
+        backupPath: productPath + PRODUCT_BACKUP_SUFFIX,
+    };
+}
+
+async function fileChecksumBase64(filePath: string): Promise<string> {
+    const buf = await fsp.readFile(filePath);
+    return createHash('sha256').update(buf).digest('base64').replace(/=+$/, '');
+}
+
+function getChecksumKey(appRoot: string, filePath: string): string {
+    return path.relative(path.join(appRoot, 'out'), filePath).replace(/\\/g, '/');
+}
+
+async function syncProductChecksums(appRoot: string, files: Array<{ path: string; label: string }>): Promise<void> {
+    const { productPath, backupPath } = getProductPaths(appRoot);
+    if (!fs.existsSync(productPath)) return;
+
+    const product = JSON.parse(await fsp.readFile(productPath, 'utf8'));
+    if (!product.checksums || typeof product.checksums !== 'object') return;
+
+    let changed = false;
+    for (const file of files) {
+        if (!fs.existsSync(file.path)) continue;
+        const key = getChecksumKey(appRoot, file.path);
+        if (!(key in product.checksums)) continue;
+
+        const actual = await fileChecksumBase64(file.path);
+        if (product.checksums[key] !== actual) {
+            product.checksums[key] = actual;
+            changed = true;
+        }
+    }
+
+    if (!changed) return;
+
+    try { await fsp.access(backupPath); } catch {
+        await fsp.copyFile(productPath, backupPath);
+    }
+
+    await fsp.writeFile(productPath, JSON.stringify(product, null, '\t'), 'utf8');
+}
+
+async function restoreProductChecksums(appRoot: string): Promise<void> {
+    const { productPath, backupPath } = getProductPaths(appRoot);
+    try {
+        await fsp.access(backupPath);
+    } catch {
+        return;
+    }
+
+    await fsp.copyFile(backupPath, productPath);
+    await fsp.unlink(backupPath);
 }
 
 /**
@@ -285,7 +345,11 @@ export async function autoApply(): Promise<PatchResult[]> {
     if (!root) return [];
 
     const files = getTargetFiles(root);
-    return Promise.all(files.map(f => patchFile(f.path, f.label)));
+    const results = await Promise.all(files.map(f => patchFile(f.path, f.label)));
+    if (results.every(r => r.success)) {
+        await syncProductChecksums(root, files);
+    }
+    return results;
 }
 
 /**
@@ -296,5 +360,7 @@ export function revertAll(): PatchResult[] {
     if (!root) return [];
 
     const files = getTargetFiles(root);
-    return files.map(f => revertFile(f.path, f.label));
+    const results = files.map(f => revertFile(f.path, f.label));
+    restoreProductChecksums(root).catch(() => undefined);
+    return results;
 }
